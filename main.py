@@ -1,60 +1,61 @@
-from pydantic import BaseModel, EmailStr, Field
-from typing import Optional
-from datetime import datetime
-from app.models.user import UserRole # Importamos el Enum del modelo
+from fastapi import FastAPI
+from contextlib import asynccontextmanager
+from sqlalchemy.exc import OperationalError
+from starlette.middleware.cors import CORSMiddleware
+import logging
 
-# --- Esquemas de Usuario y Autenticación ---
+# Configuración de log
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-class UserBase(BaseModel):
-    """Esquema base para la creación o lectura de datos de usuario."""
-    email: EmailStr = Field(..., example="medico.ejemplo@clinic.com")
+# Importaciones de la DB y modelos
+from app.database import Base, engine
+from app.routes import ruta, citas # Rutas de Autenticación (auth.py) y Citas
 
-class UserCreate(UserBase):
-    """Esquema para el registro de un nuevo usuario."""
-    password: str = Field(..., min_length=8)
-    role: UserRole = UserRole.PATIENT # Por defecto es Paciente
+# Bloque try-except para manejar el error de conexión a la DB durante el startup
+try:
+    # Intenta crear todas las tablas en la DB (si no existen)
+    Base.metadata.create_all(bind=engine)
+    logger.info("Conexión exitosa a la base de datos. Tablas creadas/verificadas.")
+except OperationalError as e:
+    logger.error(f"⚠️ ERROR: Falló la conexión a la base de datos PostgreSQL en el inicio. Esto es esperado si el servicio de DB no está corriendo. Detalles: {e}")
+    # Nota: La aplicación seguirá cargando, pero las operaciones de DB fallarán hasta que el servicio esté disponible.
 
-class UserOut(UserBase):
-    """Esquema para retornar datos de usuario (sin password hash)."""
-    id: int
-    role: UserRole
-    is_active: bool
-    
-    class Config:
-        # Permite mapear campos de SQLAlchemy a Pydantic
-        from_attributes = True 
 
-class Token(BaseModel):
-    """Esquema para el token de autenticación retornado en el login."""
-    access_token: str
-    token_type: str = "bearer"
-    role: UserRole
+# Contexto de inicio y cierre de la aplicación
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Lógica que se ejecuta al iniciar la aplicación
+    logger.info("Iniciando FastAPI server...")
+    yield
+    # Lógica que se ejecuta al cerrar la aplicación
+    logger.info("Cerrando FastAPI server...")
 
-class TokenData(BaseModel):
-    """Esquema para los datos decodificados dentro del JWT."""
-    sub: Optional[str] = None # Usado para el user ID (subject)
-    role: Optional[UserRole] = None
+# Inicialización de la aplicación FastAPI
+app = FastAPI(
+    title="No Country - API de Gestión Médica",
+    version="1.0.0",
+    lifespan=lifespan
+)
 
-# --- Esquemas de Citas ---
+# Configuración de CORS
+origins = [
+    "*", # Permite cualquier origen por ahora (para desarrollo)
+]
 
-class AppointmentBase(BaseModel):
-    """Esquema base para datos de una cita."""
-    start_time: datetime
-    end_time: datetime
-    is_virtual: bool = True
-    status: str = "scheduled"
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-class AppointmentCreate(AppointmentBase):
-    """Esquema para la creación de una cita."""
-    doctor_id: int
-    # patient_id no es necesario aquí si se obtiene del token
+# Inclusión de las rutas
+app.include_router(ruta.router, prefix="/api/v1/auth", tags=["Autenticación"])
+app.include_router(citas.router, prefix="/api/v1/appointments", tags=["Citas"])
 
-class AppointmentOut(AppointmentBase):
-    """Esquema para la lectura de una cita."""
-    id: int
-    patient_id: int
-    doctor_id: int
-    video_url: Optional[str] = None
-    
-    class Config:
-        from_attributes = True 
+# Ruta de prueba o health check
+@app.get("/")
+def read_root():
+    return {"message": "API de Gestión Médica funcionando."}
